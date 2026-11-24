@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test stub for MEGAN daa-meganizer: records its arguments on stderr so the
+# smoke test can check that the shared parameters are passed.
+echo "daa-meganizer args: $*" >&2

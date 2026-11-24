@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test stub for DIAMOND: writes the decompressed query as a stand-in ".daa".
+[[ ${1:-} == version ]] && { echo "diamond (test stub)"; exit 0; }
+while [[ $# -gt 0 ]]; do case $1 in --out) o=$2;; --query) q=$2;; esac; shift; done
+zcat "$q" > "$o"

@@ -1,0 +1,28 @@
+# =============================================================================
+#  Conda environment for the per-sample pipeline scripts (../workflow/).
+#
+#  Create and activate:
+#    mamba env create -f envs/pipeline.yml      # or: conda env create -f ...
+#    conda activate soil-mtx-mgx
+#
+#  MEGAN is NOT included: KEGG assignment requires MEGAN Ultimate Edition
+#  (licensed), whose daa-meganizer and daa2info tools must be on PATH
+#  (e.g. add <MEGAN install dir>/tools to PATH, or load an HPC module).
+#  Download: https://software-ab.cs.uni-tuebingen.de/download/megan7/welcome.html
+#
+#  Versions are not pinned here; each pipeline run records the versions it
+#  used in <sample>.software_versions.txt. For a publication, also export the
+#  exact environment:  conda env export > envs/pipeline.lock.yml
+# =============================================================================
+name: soil-mtx-mgx
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bash>=4.4          # scripts use bash features from 4.4 onwards
+  - fastp              # read QC and trimming
+  - ribodetector       # rRNA removal (metatranscriptomes); provides ribodetector_cpu
+  - seqkit             # read statistics
+  - pigz               # parallel gzip
+  - diamond>=2.1       # DIAMOND blastx
+  - gawk               # query construction (any POSIX awk also works)

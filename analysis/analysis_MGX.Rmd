@@ -1,0 +1,1225 @@
+---
+title: "Soil metagenomes: taxonomic and functional profiles"
+subtitle: "Statistical analysis of read-based DIAMOND + MEGAN profiles (NCBI taxonomy, KEGG)"
+author: "Rodrigo Taketani"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+    highlight: tango
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+geometry: margin=2cm
+fontsize: 10pt
+header-includes:
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+params:
+  # ---- Inputs ---------------------------------------------------------------
+  input_dir: "megan_output"          # folder holding one <sample>_MGX/ folder per sample
+  sample_suffix: "_MGX"             # suffix of the per-sample output folders
+  metadata: "metadata.csv"           # one row per sample (Section 3.2; template in ../config/)
+  out_dir: "results_MGX"           # tables, figures and cache are written here
+  # ---- Metadata column names -------------------------------------------------
+  col_sample: "SampleID"
+  col_treatment: "Treatment"
+  col_compartment: "Compartment"
+  col_country: "Country"
+  col_location: "Location"
+  treatment_levels: ""               # optional order, e.g. "Control,T1,T2"; first = reference
+  # ---- Low-abundance trimming -------------------------------------------------
+  min_prevalence: 0.20               # feature detected (count > 0) in >= 20 % of samples
+  min_reads: 20                      # ... AND >= 20 reads summed over all samples
+  # ---- Taxonomic levels and plots ---------------------------------------------
+  beta_rank: "Genus"                 # rank used for CLR / beta diversity
+  plot_rank: "Phylum"                # rank shown in the taxa bar plot
+  top_n_taxa: 12                     # taxa shown individually in the bar plot
+  kegg_plot_level: 2                 # KEGG hierarchy level in the function plot (1-3)
+  top_n_functions: 15                # KEGG categories shown individually
+  # ---- Statistics -------------------------------------------------------------
+  permutations: 999                  # permutations for PERMANOVA, ANOSIM, PERMDISP
+  permanova_formula: ""              # empty = built automatically (Section 8.1)
+  # ---- DivNet -----------------------------------------------------------------
+  divnet_rank: "Genus"               # rank for taxonomic alpha diversity
+  divnet_functions: true             # also estimate functional (KO) alpha diversity
+  divnet_tuning: "fast"              # "fast", "careful" (publication) or "test"
+  divnet_max_taxa_full_network: 200  # above this, DivNet uses network = "diagonal"
+  # ---- Run control ------------------------------------------------------------
+  cores: 0                           # 0 = all available cores minus one
+  seed: 20261111
+  use_cache: true                    # reuse cached CLR, permutation and DivNet results
+  run_analysis: true                 # FALSE = render the annotated code only (no data needed)
+  make_plots: true                   # FALSE = run all statistics but draw no figures
+---
+
+```{r setup, include=FALSE}
+# -----------------------------------------------------------------------------
+# Global knitr options.
+# * Every analysis chunk is evaluated only when params$run_analysis is TRUE.
+#   With FALSE the document renders as an annotated listing of the code, which
+#   needs neither data nor packages and produces no figures.
+# * Figure chunks additionally require params$make_plots = TRUE (DO_PLOTS).
+#   With make_plots = FALSE all statistics are computed and tabulated, but no
+#   figure is drawn or saved.
+# -----------------------------------------------------------------------------
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  eval       = isTRUE(params$run_analysis),
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 10,
+  fig.height = 7,
+  dpi        = 300,
+  fig.align  = "center"
+)
+DO_PLOTS <- isTRUE(params$run_analysis) && isTRUE(params$make_plots)
+```
+
+# Overview
+
+This document is part of the *soil-mtx-mgx-readbased* repository (see the
+[README](../README.md)). It analyses the per-sample outputs of
+[`workflow/mgx_profile_sample.sh`](../workflow/mgx_profile_sample.sh), which
+classifies Illumina reads from soil metagenomes with DIAMOND blastx against
+NCBI-nr and MEGAN Ultimate (`daa-meganizer`). Taxonomy is assigned with the
+weighted LCA, and functions are assigned as KEGG Orthology (KO) groups. The analysis has
+seven parts:
+
+1. **Import** of MEGAN count tables (`daa2info`) and the sample metadata.
+2. **Quality control**: reads retained at each pre-processing stage and the
+   fraction of reads that MEGAN assigned.
+3. **Feature tables**: taxa at a chosen rank and KOs, with KOs mapped to
+   KEGG hierarchy categories.
+4. **Low-abundance trimming**: a feature is kept when it is detected in at
+   least `r params$min_prevalence * 100` % of samples *and* has at least
+   `r params$min_reads` reads in total.
+5. **Centred log-ratio (CLR) transformation** after Bayesian-multiplicative
+   zero replacement.
+6. **Beta diversity** in Aitchison geometry: PCA of CLR values, PERMANOVA,
+   ANOSIM and PERMDISP (multivariate dispersion), for taxa and for functions.
+7. **Composition plots** (taxa and KEGG categories) and **alpha diversity**
+   estimated with DivNet and tested with `betta()` (breakaway).
+
+The design has three treatments, sampled across locations nested within
+countries and across soil compartments. Locations are therefore treated as
+blocks (PERMANOVA, ANOSIM) or as random effects (alpha diversity) when
+testing treatment and compartment effects. Section 8.1 describes the
+permutation designs.
+
+**Interpretation.** Counts are DNA reads. A taxon's read share scales with both its cell abundance and its genome size, so read shares are not cell shares. No genome-equivalent normalisation is applied. All comparisons are compositional (CLR) or relative. The paired metatranscriptome analysis is [`analysis_MTX.Rmd`](analysis_MTX.Rmd).
+
+**Rendering.** From the `analysis/` folder, render with
+`rmarkdown::render("analysis_MGX.Rmd", params = list(input_dir = ..., metadata = ...))`.
+Relative paths are resolved from `analysis/`. To try the analysis without
+real data, generate the simulated data set described in
+[`test/README.md`](../test/README.md).
+Set `run_analysis = FALSE` to obtain the annotated code without data, or
+`make_plots = FALSE` to run the full analysis without figures. Expensive
+steps are cached as `.rds` files in `<out_dir>/cache`. A cached result is
+recomputed automatically when its inputs or relevant parameters change.
+
+# Set-up
+
+## Packages
+
+```{r packages}
+# CRAN:          data.table, dplyr, tidyr, tibble, ggplot2, cowplot, vegan,
+#                permute, zCompositions, multcompView, knitr, breakaway
+# Bioconductor:  phyloseq (container required by DivNet)
+# GitHub:        DivNet (remotes::install_github("adw96/DivNet"))
+suppressPackageStartupMessages({
+  library(data.table)     # fast reading, reshaping and aggregation
+  library(dplyr)          # data-frame manipulation for plotting tables
+  library(tidyr)          # wide <-> long reshaping
+  library(tibble)         # rownames_to_column()
+  library(ggplot2)        # figures
+  library(cowplot)        # theme_cowplot() and multi-panel layouts
+  library(vegan)          # adonis2 (PERMANOVA), anosim, betadisper (PERMDISP)
+  library(permute)        # restricted permutation designs (blocks, plots)
+  library(zCompositions)  # cmultRepl(): zero replacement before CLR
+  library(phyloseq)       # otu_table / sample_data objects for DivNet
+  library(breakaway)      # betta(), betta_random(), betta_lincom()
+  library(DivNet)         # divnet(): alpha diversity under a network model
+  library(multcompView)   # compact letter displays
+  library(knitr)          # kable() tables
+})
+```
+
+## Run settings
+
+```{r settings}
+# ---- Reproducibility --------------------------------------------------------
+set.seed(params$seed)
+
+# ---- Parallel resources -----------------------------------------------------
+# cores = 0 -> all logical cores minus one. The same number of workers is used
+# by data.table (file parsing, aggregation), by file import (forked workers on
+# Linux/macOS), by every vegan permutation test and by DivNet's MCMC sampler.
+N_CORES <- if (is.null(params$cores) || params$cores <= 0) {
+  max(1L, parallel::detectCores(logical = TRUE) - 1L)
+} else {
+  as.integer(params$cores)
+}
+data.table::setDTthreads(N_CORES)
+options(mc.cores = N_CORES)
+
+# vegan accepts either a number of workers or a ready-made socket cluster.
+# On Windows it would otherwise create (and destroy) a new cluster for every
+# test, so one cluster is created here and reused; it is stopped at the end.
+# On Linux/macOS vegan forks the R session, which needs no set-up.
+if (.Platform$OS.type == "windows" && N_CORES > 1) {
+  VEGAN_PAR <- parallel::makeCluster(N_CORES)
+  invisible(parallel::clusterEvalQ(VEGAN_PAR, library(vegan)))
+} else {
+  VEGAN_PAR <- N_CORES
+}
+
+# ---- Output folders ---------------------------------------------------------
+FIG_DIR   <- file.path(params$out_dir, "figures")
+TAB_DIR   <- file.path(params$out_dir, "tables")
+CACHE_DIR <- file.path(params$out_dir, "cache")
+for (d in c(FIG_DIR, TAB_DIR, CACHE_DIR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+# ---- Constants ----------------------------------------------------------------
+# MEGAN labels major ranks with single letters: [D] domain, [K] kingdom
+# (not written for prokaryotes), [P] phylum, [C] class, [O] order,
+# [F] family, [G] genus, [S] species.
+RANKS <- c(D = "Domain", K = "Kingdom", P = "Phylum", C = "Class",
+           O = "Order", F = "Family", G = "Genus", S = "Species")
+# Design factors in the order used by the automatic PERMANOVA model.
+FACTORS <- c("Country", "Location", "Compartment", "Treatment")
+
+cat("Workers used:", N_CORES, "\n")
+```
+
+## Helper functions
+
+```{r helpers}
+# ---- Parallel lapply ----------------------------------------------------------
+# Forks on Linux/macOS (mclapply); falls back to a serial lapply on Windows,
+# where forking is unavailable. Errors in workers are re-raised.
+par_lapply <- function(X, FUN, ...) {
+  if (.Platform$OS.type == "unix" && N_CORES > 1) {
+    res <- parallel::mclapply(X, FUN, ..., mc.cores = N_CORES)
+    bad <- vapply(res, inherits, logical(1), what = "try-error")
+    if (any(bad)) stop("Parallel task failed: ", as.character(res[[which(bad)[1]]]))
+    res
+  } else {
+    lapply(X, FUN, ...)
+  }
+}
+
+# ---- Result cache -------------------------------------------------------------
+# cached(name, key, expr): returns the stored result when <name>.rds exists AND
+# was produced from an identical `key` (inputs + parameters, compared by hash);
+# otherwise evaluates `expr` (lazily) and stores the result with its key.
+cached <- function(name, key, expr) {
+  f <- file.path(CACHE_DIR, paste0(name, ".rds"))
+  h <- rlang::hash(key)
+  if (isTRUE(params$use_cache) && file.exists(f)) {
+    obj <- readRDS(f)
+    if (identical(obj$hash, h)) return(obj$value)
+  }
+  value <- force(expr)
+  saveRDS(list(hash = h, value = value), f)
+  value
+}
+
+# ---- Tables -------------------------------------------------------------------
+# Writes a table to <out_dir>/tables/<name>.csv and returns it for printing.
+save_table <- function(x, name) {
+  data.table::fwrite(as.data.frame(x), file.path(TAB_DIR, paste0(name, ".csv")))
+  invisible(x)
+}
+# Formatted table for the report (LaTeX booktabs in PDF, HTML otherwise).
+ktab <- function(x, caption = NULL, digits = 3) {
+  knitr::kable(x, caption = caption, digits = digits, booktabs = TRUE,
+               row.names = FALSE, format.args = list(big.mark = ","))
+}
+
+# ---- Figures --------------------------------------------------------------------
+# Saves a ggplot/cowplot object as PDF (vector) and PNG (300 dpi), both with
+# transparent backgrounds, and returns the object for display.
+save_plot <- function(p, name, width = 10, height = 7) {
+  ggsave(file.path(FIG_DIR, paste0(name, ".pdf")), p, width = width,
+         height = height, bg = "transparent")
+  ggsave(file.path(FIG_DIR, paste0(name, ".png")), p, width = width,
+         height = height, dpi = 300, bg = "transparent")
+  p
+}
+
+# Common theme: cowplot with transparent backgrounds.
+theme_set(
+  cowplot::theme_cowplot(font_size = 11) +
+    theme(plot.background   = element_rect(fill = "transparent", colour = NA),
+          panel.background  = element_rect(fill = "transparent", colour = NA),
+          legend.background = element_rect(fill = "transparent", colour = NA),
+          strip.background  = element_rect(fill = "grey92", colour = NA))
+)
+
+# Qualitative palette (20 colours) for taxa, KEGG categories and design factors.
+PAL <- c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02",
+         "#A6761D", "#1F78B4", "#B2DF8A", "#FB9A99", "#FDBF6F", "#CAB2D6",
+         "#6A3D9A", "#B15928", "#8DD3C7", "#BEBADA", "#80B1D3", "#FCCDE5",
+         "#BC80BD", "#CCEBC5")
+pal_for <- function(levels) {
+  # Fixed palette while it suffices; evenly spaced hues for more levels.
+  if (length(levels) <= length(PAL)) setNames(PAL[seq_along(levels)], levels)
+  else setNames(scales::hue_pal()(length(levels)), levels)
+}
+
+# ---- Design helpers -------------------------------------------------------------
+# A factor is usable in a model when present and with >= 2 observed levels.
+usable <- function(v, m) {
+  v %in% names(m) && nlevels(droplevels(factor(m[[v]]))) > 1
+}
+```
+
+# Data import
+
+## MEGAN count tables
+
+The pipeline writes these tables per sample with `daa2info`. Each line is
+`<label><TAB><count>`, and labels may contain spaces and semicolons.
+
+| File | Content |
+|---|---|
+| `<sample>.Taxonomy.paths.counts.tsv` | lineage at major ranks (`[D] Bacteria; [P] ...;`) → reads assigned to that node |
+| `<sample>.KEGG.counts.tsv` | KO → reads |
+| `<sample>.KEGG.paths.counts.tsv` | KEGG hierarchy path → reads (hierarchy only; a KO in several pathways is repeated) |
+| `<sample>.read_counts.tsv` | SeqKit read counts at each pre-processing stage |
+
+Counts are per *read*, so each mate of a pair counts once, because
+`daa-meganizer` classifies mates independently. Unassigned reads are not
+reported by `daa2info` and are therefore absent from all tables.
+
+```{r import-functions}
+# ---- Generic reader -----------------------------------------------------------
+# Splits each line at its LAST tab, so labels containing spaces, semicolons or
+# brackets are kept intact. Comment lines (#) and empty lines are ignored.
+read_megan_counts <- function(file) {
+  x <- readLines(file, warn = FALSE)
+  x <- x[nzchar(x) & !startsWith(x, "#")]
+  if (!length(x)) return(data.table(label = character(), count = numeric()))
+  data.table(label = sub("\t[^\t]*$", "", x),
+             count = as.numeric(sub("^.*\t", "", x)))
+}
+
+# ---- Taxonomic path parser ----------------------------------------------------
+# "[D] Bacteria; [P] Pseudomonadota; [C] unknown; ...;" -> one value per rank.
+# "unknown" placeholders (ranks missing in NCBI) become NA. An empty path is
+# the root node (reads assigned above domain level) and yields all NA.
+parse_tax_path <- function(path) {
+  out <- setNames(rep(NA_character_, length(RANKS)), RANKS)
+  tok <- trimws(strsplit(path, ";", fixed = TRUE)[[1]])
+  tok <- tok[nzchar(tok)]
+  m   <- regmatches(tok, regexec("^\\[([A-Z])\\]\\s*(.*)$", tok))
+  for (mm in m) {
+    if (length(mm) == 3 && mm[2] %in% names(RANKS) &&
+        !identical(tolower(mm[3]), "unknown")) {
+      out[RANKS[[mm[2]]]] <- mm[3]
+    }
+  }
+  out
+}
+
+# ---- KO identifier from a MEGAN KEGG label ---------------------------------------
+# Labels normally start with the KO ("K00370 narG, narZ, nxrA; nitrate
+# reductase ..."). If names were not exported, the label is the numeric KO
+# id (370 -> K00370). Anything else returns NA and is reported.
+ko_from_label <- function(x) {
+  out <- rep(NA_character_, length(x))
+  has <- grepl("K[0-9]{5}", x)
+  out[has] <- regmatches(x[has], regexpr("K[0-9]{5}", x[has]))
+  num <- !has & grepl("^[0-9]+$", trimws(x))
+  out[num] <- sprintf("K%05d", as.integer(trimws(x[num])))
+  out
+}
+
+# ---- KEGG hierarchy path parser -------------------------------------------------
+# "Metabolism;Energy metabolism;Nitrogen metabolism [PATH:ko00910];K00370 narG;"
+# -> KO + levels L1-L3. A leading root element ("KEGG"/"root") is dropped and
+# numeric prefixes / [PATH:...] / [BR:...] suffixes are removed for display.
+clean_kegg_name <- function(x) {
+  x <- sub("^[0-9]{5}\\s+", "", x)
+  x <- sub("\\s*\\[(PATH|BR|EC):[^]]*\\]\\s*$", "", x)
+  trimws(x)
+}
+parse_kegg_path <- function(path) {
+  el <- trimws(strsplit(path, ";", fixed = TRUE)[[1]])
+  el <- el[nzchar(el)]
+  ko_pos <- grep("^K[0-9]{5}", el)
+  if (!length(ko_pos)) return(NULL)                  # not a KO-level path
+  ko_pos <- ko_pos[length(ko_pos)]
+  hier <- el[seq_len(ko_pos - 1)]
+  hier <- hier[!tolower(hier) %in% c("kegg", "root")]
+  hier <- clean_kegg_name(hier)
+  data.table(KO = regmatches(el[ko_pos], regexpr("K[0-9]{5}", el[ko_pos])),
+             L1 = hier[1], L2 = hier[2], L3 = hier[3])
+}
+```
+
+```{r import}
+# ---- Locate per-sample folders ----------------------------------------------
+# One folder per sample, named <sample><suffix> (e.g. Plot12_S3_MGX), as
+# written by the shell pipeline. Sub-folders are searched recursively.
+tax_files <- list.files(params$input_dir, pattern = "\\.Taxonomy\\.paths\\.counts\\.tsv$",
+                        recursive = TRUE, full.names = TRUE)
+tax_files <- tax_files[endsWith(basename(dirname(tax_files)), params$sample_suffix)]
+if (!length(tax_files)) {
+  stop("No *.Taxonomy.paths.counts.tsv found under '", params$input_dir,
+       "' in folders ending in '", params$sample_suffix, "'.")
+}
+samples_found <- sub("\\.Taxonomy\\.paths\\.counts\\.tsv$", "", basename(tax_files))
+if (anyDuplicated(samples_found)) {
+  stop("Duplicated sample names: ",
+       paste(unique(samples_found[duplicated(samples_found)]), collapse = ", "))
+}
+sample_dirs <- setNames(dirname(tax_files), samples_found)
+
+# ---- Read all tables of one sample ----------------------------------------------
+read_sample <- function(s) {
+  f <- function(suffix) file.path(sample_dirs[[s]], paste0(s, suffix))
+  opt <- function(suffix, reader) if (file.exists(f(suffix))) reader(f(suffix)) else NULL
+  list(
+    tax   = read_megan_counts(f(".Taxonomy.paths.counts.tsv")),
+    ko    = opt(".KEGG.counts.tsv",       read_megan_counts),
+    kpath = opt(".KEGG.paths.counts.tsv", read_megan_counts),
+    rc    = opt(".read_counts.tsv",       function(x) fread(x, sep = "\t"))
+  )
+}
+
+# Samples are read in parallel (forked workers on Linux/macOS).
+raw <- setNames(par_lapply(samples_found, read_sample), samples_found)
+cat(length(raw), "sample folders read from", params$input_dir, "\n")
+```
+
+## Sample metadata
+
+The metadata file (CSV or TSV) must contain one row per sample, with the
+sample identifier (the pipeline's sample name) and the four design factors.
+The column names are set in the YAML parameters.
+
+```{r metadata}
+meta_raw <- fread(params$metadata, colClasses = "character",
+                  na.strings = c("", "NA", "na", "N/A"))
+
+# ---- Required columns -------------------------------------------------------------
+col_map <- c(SampleID = params$col_sample, Treatment = params$col_treatment,
+             Compartment = params$col_compartment, Country = params$col_country,
+             Location = params$col_location)
+missing_cols <- setdiff(col_map, names(meta_raw))
+if (length(missing_cols)) stop("Metadata lacks column(s): ", paste(missing_cols, collapse = ", "))
+
+# Canonical names are used throughout; trailing spaces (a frequent cause of
+# sample-ID mismatches) are removed. Extra metadata columns are kept.
+meta <- as.data.frame(meta_raw)
+for (nm in names(col_map)) meta[[nm]] <- trimws(meta_raw[[col_map[[nm]]]])
+meta <- meta[, c(names(col_map), setdiff(names(meta), c(names(col_map), col_map))), drop = FALSE]
+
+# ---- Missing values in design factors stop the analysis -----------------------------
+na_rows <- meta$SampleID[!complete.cases(meta[, names(col_map)])]
+if (length(na_rows)) {
+  stop("Missing SampleID or design-factor values for: ", paste(na_rows, collapse = ", "))
+}
+if (anyDuplicated(meta$SampleID)) stop("Duplicated SampleID values in the metadata.")
+
+# ---- Match metadata to sequenced samples -----------------------------------------------
+only_data <- setdiff(samples_found, meta$SampleID)
+only_meta <- setdiff(meta$SampleID, samples_found)
+mismatch  <- data.frame(
+  Issue   = c("Sequenced, not in metadata (excluded)", "In metadata, not sequenced (excluded)"),
+  N       = c(length(only_data), length(only_meta)),
+  Samples = c(paste(head(only_data, 10), collapse = ", "), paste(head(only_meta, 10), collapse = ", "))
+)
+meta <- meta[meta$SampleID %in% samples_found, , drop = FALSE]
+if (nrow(meta) < 3) stop("Fewer than three samples have both data and metadata.")
+rownames(meta) <- meta$SampleID
+
+# ---- Location labels must be unique across countries ----------------------------------------
+# If the same location name occurs in two countries, Country_Location is used.
+if (anyDuplicated(unique(meta[, c("Country", "Location")])$Location)) {
+  meta$Location <- paste(meta$Country, meta$Location, sep = "_")
+}
+
+# ---- Factors (the first Treatment level is the reference) ---------------------------------------
+tl <- trimws(strsplit(params$treatment_levels, ",", fixed = TRUE)[[1]])
+tl <- tl[nzchar(tl)]
+meta$Treatment <- if (length(tl)) factor(meta$Treatment, levels = tl) else factor(meta$Treatment)
+if (anyNA(meta$Treatment)) stop("Treatment values not listed in params$treatment_levels.")
+for (v in c("Compartment", "Country", "Location")) meta[[v]] <- factor(meta[[v]])
+
+# Sample order used everywhere: country, location, compartment, treatment.
+meta    <- meta[order(meta$Country, meta$Location, meta$Compartment, meta$Treatment, meta$SampleID), ]
+SAMPLES <- meta$SampleID
+
+ktab(mismatch, "Matching of sequenced samples and metadata.")
+```
+
+```{r design-table}
+# Replication per country x compartment x treatment (number of samples).
+design <- as.data.frame.matrix(xtabs(~ interaction(Country, Compartment, sep = " / ") + Treatment, meta))
+design <- cbind(`Country / Compartment` = rownames(design), design)
+ktab(save_table(design, "design_replication"),
+     "Number of samples per country, compartment and treatment.")
+cat("Locations per country:\n"); print(tapply(meta$Location, meta$Country, function(x) length(unique(x))))
+```
+
+# Quality control
+
+The table reports read pairs before and after quality trimming and PCR-duplicate removal, and the percentage of retained reads assigned to a taxon or a KO.
+
+```{r qc, results = "asis"}
+# Read pairs at each stage come from <sample>.read_counts.tsv (SeqKit). Only
+# R1 rows are used (R1 and R2 counts are identical); the first row is the raw
+# R1 file given to the pipeline. Assigned reads are counted per mate, so they
+# are expressed relative to 2 x the number of pairs searched with DIAMOND.
+n_seqs <- function(rc, pattern) {
+  i <- grep(pattern, rc$file)
+  if (length(i)) as.numeric(rc$num_seqs[i[1]]) else NA_real_
+}
+
+qc <- rbindlist(lapply(SAMPLES, function(s) {
+  rc  <- raw[[s]]$rc
+  tax <- sum(raw[[s]]$tax$count)                               # reads with taxonomy
+  ko  <- if (is.null(raw[[s]]$ko)) NA_real_ else sum(raw[[s]]$ko$count)  # reads with a KO
+  out <- data.table(SampleID = s, assigned_taxonomy = tax, assigned_KEGG = ko)
+  if (is.null(rc)) return(out)
+  rawp <- as.numeric(rc$num_seqs[1])
+  trim <- n_seqs(rc, "\\.qc_R1\\.fq\\.gz$")                    # after trimming + deduplication
+  cbind(out, data.table(
+    raw_pairs     = rawp,
+    retained_pairs = trim,
+    removed_QC_dedup_pct  = 100 * (1 - trim / rawp),
+    taxonomy_assigned_pct = 100 * tax / (2 * trim),
+    KEGG_assigned_pct     = 100 * ko  / (2 * trim)))
+}), fill = TRUE)
+
+# ---- Summary across samples ---------------------------------------------------
+num <- setdiff(names(qc)[vapply(qc, is.numeric, logical(1))], character(0))
+qc_sum <- data.frame(
+  Metric = num,
+  Median = vapply(num, function(v) median(qc[[v]], na.rm = TRUE), numeric(1)),
+  Min    = vapply(num, function(v) suppressWarnings(min(qc[[v]], na.rm = TRUE)), numeric(1)),
+  Max    = vapply(num, function(v) suppressWarnings(max(qc[[v]], na.rm = TRUE)), numeric(1)))
+save_table(qc, "qc_per_sample")
+print(ktab(qc_sum, "Read retention and assignment across samples (per-sample values in tables/qc_per_sample.csv).", 1))
+
+# Samples with fewer than 10 % of the median number of assigned reads are
+# flagged; they are kept, but should be inspected before interpretation.
+low <- qc[assigned_taxonomy < 0.1 * median(assigned_taxonomy, na.rm = TRUE), SampleID]
+if (length(low)) cat("Samples with < 10 % of the median assigned reads:", paste(low, collapse = ", "), "\n")
+```
+
+# Feature tables
+
+## Taxonomy
+
+MEGAN reports reads at the node they were assigned to. With
+`--majorRanksOnly`, reads at intermediate ranks are moved up to the nearest
+major-rank ancestor. A table at rank *R* is built by summing every node at or
+below *R* within each lineage. Reads whose node lies above *R* form the
+"Unclassified" group at that rank. Features are identified by their full
+lineage, so homonyms in different lineages stay separate.
+
+```{r taxonomy}
+# ---- Long table of all samples ---------------------------------------------
+tax_long <- rbindlist(lapply(SAMPLES, function(s) raw[[s]]$tax[, .(label, count, SampleID = s)]))
+
+# ---- Parse every distinct lineage once ----------------------------------------
+tax_paths  <- unique(tax_long$label)
+tax_lookup <- as.data.table(do.call(rbind, lapply(tax_paths, parse_tax_path)))
+tax_lookup[, label := tax_paths]
+
+# ---- Count matrix (samples x taxa) at a given rank ----------------------------------
+make_tax_matrix <- function(rank) {
+  k  <- match(rank, RANKS)
+  rk <- RANKS[seq_len(k)]
+  lk <- tax_lookup[, c("label", rk), with = FALSE]
+  r  <- as.matrix(lk[, rk, with = FALSE])
+  # Lineage key "Bacteria;?;Actinomycetota;..." ("?" = rank missing in NCBI);
+  # NA at the target rank -> the read stopped above it -> "Unclassified".
+  key <- apply(r, 1, function(v) paste(ifelse(is.na(v), "?", v), collapse = ";"))
+  lk[, feature := ifelse(is.na(r[, k]), "Unclassified", key)]
+  dt <- merge(tax_long, lk[, .(label, feature)], by = "label")
+  w  <- dcast(dt, SampleID ~ feature, value.var = "count", fun.aggregate = sum, fill = 0)
+  m  <- as.matrix(w[, -1, with = FALSE]); rownames(m) <- w$SampleID
+  m  <- m[SAMPLES, , drop = FALSE]
+  # Display names: name at the target rank, made unique with the parent rank
+  # (then with a counter) when two lineages share a name.
+  disp <- sub("^.*;", "", colnames(m))
+  dup  <- disp %in% disp[duplicated(disp)] & colnames(m) != "Unclassified"
+  disp[dup] <- vapply(strsplit(colnames(m)[dup], ";"), function(v) paste(rev(tail(v, 2)), collapse = " | "), "")
+  list(mat = m, display = setNames(make.unique(disp), colnames(m)))
+}
+
+tax_beta <- make_tax_matrix(params$beta_rank)   # for CLR / beta diversity
+tax_plot <- make_tax_matrix(params$plot_rank)   # for the composition plot
+tax_div  <- if (params$divnet_rank == params$beta_rank) tax_beta else make_tax_matrix(params$divnet_rank)
+
+assigned_summary <- data.frame(
+  Rank = c(params$beta_rank, params$plot_rank),
+  Taxa = c(ncol(tax_beta$mat), ncol(tax_plot$mat)) - 1,
+  `Reads unclassified at rank (%)` = c(
+    100 * sum(tax_beta$mat[, "Unclassified"]) / sum(tax_beta$mat),
+    100 * sum(tax_plot$mat[, "Unclassified"]) / sum(tax_plot$mat)),
+  check.names = FALSE)
+ktab(assigned_summary, "Taxa observed and taxonomically assigned reads not resolved to each rank.", 1)
+```
+
+## KEGG functions
+
+```{r functions}
+# ---- KO count matrix ------------------------------------------------------------
+if (all(vapply(raw[SAMPLES], function(x) is.null(x$ko), logical(1)))) {
+  stop("No <sample>.KEGG.counts.tsv files found: KEGG export is required.")
+}
+ko_long <- rbindlist(lapply(SAMPLES, function(s) {
+  if (is.null(raw[[s]]$ko)) return(NULL)
+  raw[[s]]$ko[, .(label, count, SampleID = s)]
+}))
+ko_long[, KO := ko_from_label(label)]
+n_bad <- ko_long[is.na(KO), uniqueN(label)]
+if (n_bad) message(n_bad, " KEGG labels without a KO identifier were dropped.")
+ko_long <- ko_long[!is.na(KO)]
+ko_desc <- ko_long[, .(description = label[1]), by = KO]   # KO -> descriptive label
+
+ko_w   <- dcast(ko_long, SampleID ~ KO, value.var = "count", fun.aggregate = sum, fill = 0)
+ko_mat <- as.matrix(ko_w[, -1, with = FALSE]); rownames(ko_mat) <- ko_w$SampleID
+ko_mat <- ko_mat[intersect(SAMPLES, rownames(ko_mat)), , drop = FALSE]
+if (nrow(ko_mat) < length(SAMPLES)) {
+  warning("Samples without KEGG counts: ", paste(setdiff(SAMPLES, rownames(ko_mat)), collapse = ", "))
+}
+
+# ---- KEGG hierarchy (KO -> L1 / L2 / L3) ---------------------------------------
+# Built from the union of paths over all samples; counts in these files are not
+# used, because a KO in several pathways is listed once per pathway.
+kpaths <- unique(unlist(lapply(SAMPLES, function(s) raw[[s]]$kpath$label)))
+kegg_hier <- if (length(kpaths)) rbindlist(lapply(kpaths, parse_kegg_path)) else NULL
+cat(ncol(ko_mat), "KOs;",
+    if (is.null(kegg_hier)) "no KEGG hierarchy files found (function plot will show KOs)."
+    else paste(uniqueN(kegg_hier$KO), "KOs placed in the KEGG hierarchy."), "\n")
+```
+
+```{r kegg-weights}
+# ---- KO -> category weights at the chosen level ------------------------------------
+# A KO may belong to several categories (e.g. a transporter in many pathways).
+# To keep category totals equal to the number of KO-assigned reads, each KO's
+# reads are split equally among its categories (weight = 1 / n categories).
+# BRITE-only sections ("Brite Hierarchies", "Not Included in Pathway or Brite")
+# are used only for KOs that have no pathway-based category.
+ko_category_weights <- function(level) {
+  if (is.null(kegg_hier)) return(NULL)
+  h <- unique(kegg_hier[, .(KO, L1, category = get(paste0("L", level)))])
+  h <- h[!is.na(category)]
+  h[, generic := grepl("brite|not included", L1, ignore.case = TRUE)]
+  h <- h[, .SD[!generic | all(generic)], by = KO]
+  h <- unique(h[, .(KO, category)])
+  h[, weight := 1 / .N, by = KO]
+  h
+}
+kegg_weights <- ko_category_weights(params$kegg_plot_level)
+
+# Category matrix (samples x categories); KOs outside the hierarchy are
+# collected as "No KEGG category".
+if (!is.null(kegg_weights)) {
+  cl <- merge(ko_long[, .(SampleID, KO, count)], kegg_weights, by = "KO", all.x = TRUE,
+              allow.cartesian = TRUE)
+  cl[is.na(category), `:=`(category = "No KEGG category", weight = 1)]
+  cl[, wcount := count * weight]             # reads shared out among categories
+  cw <- dcast(cl, SampleID ~ category, value.var = "wcount", fun.aggregate = sum, fill = 0)
+  cat_mat <- as.matrix(cw[, -1, with = FALSE]); rownames(cat_mat) <- cw$SampleID
+  cat_mat <- cat_mat[rownames(ko_mat), , drop = FALSE]
+} else {
+  cat_mat <- NULL
+}
+```
+
+# Low-abundance trimming
+
+A feature is retained when it is **detected (count > 0) in at least
+`r params$min_prevalence * 100` % of samples** and has **at least
+`r params$min_reads` reads summed over all samples**. "Unclassified" taxa are
+excluded before trimming because they do not form a biological unit. Note
+that a feature confined to one compartment or country can fall below the
+prevalence threshold when that group makes up less than 20 % of the samples.
+
+```{r trimming}
+trim_features <- function(m, min_prev = params$min_prevalence, min_reads = params$min_reads) {
+  prev <- colMeans(m > 0)
+  tot  <- colSums(m)
+  keep <- prev >= min_prev & tot >= min_reads
+  kept <- round(m[, keep, drop = FALSE])     # DivNet / CLR expect whole counts
+  # Samples left without any read after trimming cannot be analysed.
+  empty <- rowSums(kept) == 0
+  if (any(empty)) warning("Samples empty after trimming (removed): ", paste(rownames(kept)[empty], collapse = ", "))
+  list(mat = kept[!empty, , drop = FALSE],
+       summary = data.frame(`Features before` = ncol(m), `Features kept` = sum(keep),
+                            `Reads retained (%)` = 100 * sum(kept) / sum(m), check.names = FALSE))
+}
+
+drop_unclassified <- function(m) m[, colnames(m) != "Unclassified", drop = FALSE]
+
+trimmed <- list(
+  Taxonomy = trim_features(drop_unclassified(tax_beta$mat)),
+  Function = trim_features(ko_mat)
+)
+trimmed_div <- list(
+  Taxonomy = if (params$divnet_rank == params$beta_rank) trimmed$Taxonomy
+             else trim_features(drop_unclassified(tax_div$mat)),
+  Function = trimmed$Function
+)
+
+trim_tab <- cbind(Set = c(paste0("Taxonomy (", params$beta_rank, ")"), "Function (KO)"),
+                  rbind(trimmed$Taxonomy$summary, trimmed$Function$summary))
+ktab(save_table(trim_tab, "trimming_summary"), "Features before and after trimming.", 1)
+
+# Trimmed count tables are exported for downstream use.
+for (nm in names(trimmed)) {
+  save_table(data.frame(SampleID = rownames(trimmed[[nm]]$mat), trimmed[[nm]]$mat, check.names = FALSE),
+             paste0("counts_trimmed_", nm))
+}
+```
+
+# CLR transformation
+
+Zeros are replaced with the Bayesian-multiplicative method
+(`zCompositions::cmultRepl`, geometric Bayesian multiplicative prior, output as
+pseudo-counts). Each sample is then transformed with the centred log-ratio,
+$\mathrm{clr}(x)_j = \log x_j - \overline{\log x}$. Euclidean distances
+between CLR vectors are Aitchison distances, and PCA of the CLR matrix is the
+corresponding Aitchison ordination.
+
+```{r clr}
+clr_transform <- function(m) {
+  # z.delete = FALSE keeps every feature/sample: the trimming step already
+  # bounds zeros per feature at (1 - min_prevalence).
+  z <- if (any(m == 0)) {
+    zCompositions::cmultRepl(m, method = "GBM", output = "p-counts",
+                             z.warning = 0.8, z.delete = FALSE, suppress.print = TRUE)
+  } else m
+  lz <- log(as.matrix(z))
+  lz - rowMeans(lz)                          # centre each sample (row)
+}
+
+clr <- lapply(names(trimmed), function(nm) {
+  cached(paste0("clr_", nm), list(trimmed[[nm]]$mat, "GBM"), clr_transform(trimmed[[nm]]$mat))
+})
+names(clr) <- names(trimmed)
+
+for (nm in names(clr)) {
+  save_table(data.frame(SampleID = rownames(clr[[nm]]), clr[[nm]], check.names = FALSE),
+             paste0("clr_", nm))
+}
+```
+
+# Beta diversity (Aitchison)
+
+## Statistical design
+
+These tests are run on Aitchison distances, separately for taxa and for
+functions:
+
+* **Global PERMANOVA** (`adonis2`, sequential sums of squares, free
+  permutations). The automatic model is
+  `Country + Location + Compartment * Treatment`. Location follows Country,
+  so its term captures variation among locations *within* countries. This
+  model partitions variance (R²) among all factors. Its *p*-values for
+  Country and Location treat samples as independent, although samples are
+  replicated within locations, so they are optimistic.
+* **Treatment and Compartment**: PERMANOVA with permutations restricted
+  **within locations** (`how(blocks = Location)`), with Location fitted
+  first. This is the inferential test for these two factors.
+* **Country**: PERMANOVA in which whole locations are permuted between
+  countries (`how(plots = Plots(Location), within = Within("none"))`). This
+  uses locations as the replicates for country and requires an equal number
+  of samples per location. With few locations the number of distinct
+  permutations, and hence the smallest attainable *p*-value, is small.
+* **Pairwise PERMANOVA** between treatment levels (blocked within locations,
+  with Compartment fitted first), with Benjamini–Hochberg adjustment.
+* **ANOSIM** for each factor (stratified by location for Treatment and
+  Compartment).
+* **PERMDISP** (`betadisper` + `permutest`) for each factor. A significant
+  PERMANOVA accompanied by a significant PERMDISP can reflect differences in
+  dispersion rather than in location (centroid).
+
+```{r beta-functions}
+# ---- Automatic PERMANOVA terms -------------------------------------------------
+global_terms <- function(m) {
+  tt <- FACTORS[vapply(FACTORS, usable, logical(1), m = m)]
+  if (all(c("Compartment", "Treatment") %in% tt)) tt <- c(tt, "Compartment:Treatment")
+  tt
+}
+
+# ---- adonis2 / anova table -> data frame --------------------------------------
+tidy_adonis <- function(a, keep = NULL) {
+  d <- data.frame(Term = rownames(a), as.data.frame(a), check.names = FALSE, row.names = NULL)
+  if (!is.null(keep)) d <- d[d$Term %in% c(keep, "Residual", "Total"), ]
+  d
+}
+
+# ---- Full beta-diversity suite for one CLR matrix -----------------------------------
+beta_suite <- function(X, label) {
+  m <- droplevels(meta[rownames(X), , drop = FALSE])
+  D <- dist(X)                                   # Aitchison distance
+  perm <- params$permutations
+  has_loc <- usable("Location", m)
+
+  # -- PCA of CLR values (Aitchison PCA) --
+  pca <- prcomp(X, center = TRUE, scale. = FALSE)
+  ve  <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+  scores <- data.frame(SampleID = rownames(X), PC1 = pca$x[, 1], PC2 = pca$x[, 2],
+                       PC3 = if (ncol(pca$x) > 2) pca$x[, 3] else NA,
+                       m[, intersect(FACTORS, names(m)), drop = FALSE])
+
+  # -- 1. Global PERMANOVA (variance partitioning) --
+  rhs <- if (nzchar(params$permanova_formula)) params$permanova_formula
+         else paste(global_terms(m), collapse = " + ")
+  glob <- adonis2(as.formula(paste("D ~", rhs)), data = m, permutations = perm,
+                  by = "terms", parallel = VEGAN_PAR)
+
+  # -- 2. Treatment / Compartment, permuted within locations --
+  blocked <- NULL
+  tc <- intersect(c("Compartment", "Treatment"), FACTORS[vapply(FACTORS, usable, logical(1), m = m)])
+  if (length(tc) && has_loc) {
+    tt <- c("Location", tc, if (length(tc) == 2) "Compartment:Treatment")
+    blocked <- adonis2(as.formula(paste("D ~", paste(tt, collapse = " + "))), data = m,
+                       permutations = how(nperm = perm, blocks = m$Location),
+                       by = "terms", parallel = VEGAN_PAR)
+    blocked <- tidy_adonis(blocked, keep = setdiff(tt, "Location"))
+  }
+
+  # -- 3. Country, permuting whole locations --
+  country <- NULL
+  if (usable("Country", m) && has_loc) {
+    sizes <- table(m$Location)
+    if (length(unique(sizes)) == 1) {
+      ctrl <- how(nperm = perm, plots = Plots(strata = m$Location, type = "free"),
+                  within = Within(type = "none"))
+      country <- tidy_adonis(adonis2(D ~ Country, data = m, permutations = ctrl,
+                                     parallel = VEGAN_PAR))
+    } else {
+      country <- data.frame(Term = "Country",
+                            Note = "Not tested: unequal number of samples per location.")
+    }
+  }
+
+  # -- 4. Pairwise PERMANOVA between treatment levels --
+  pairwise <- NULL
+  if (usable("Treatment", m) && nlevels(m$Treatment) > 2) {
+    prs <- combn(levels(m$Treatment), 2, simplify = FALSE)
+    Dm  <- as.matrix(D)
+    pairwise <- do.call(rbind, lapply(prs, function(pr) {
+      idx <- m$Treatment %in% pr
+      ms  <- droplevels(m[idx, , drop = FALSE])
+      Ds  <- as.dist(Dm[idx, idx])
+      cov <- if (usable("Compartment", ms)) "Compartment + " else ""
+      ctl <- if (usable("Location", ms)) how(nperm = perm, blocks = ms$Location) else how(nperm = perm)
+      a   <- adonis2(as.formula(paste("Ds ~", cov, "Treatment")), data = ms,
+                     permutations = ctl, by = "terms", parallel = VEGAN_PAR)
+      data.frame(Comparison = paste(pr, collapse = " vs "), R2 = a["Treatment", "R2"],
+                 F = a["Treatment", "F"], p = a["Treatment", "Pr(>F)"])
+    }))
+    pairwise$p_BH <- p.adjust(pairwise$p, "BH")
+  }
+
+  # -- 5. ANOSIM and 6. PERMDISP for each factor --
+  fac <- FACTORS[vapply(FACTORS, usable, logical(1), m = m)]
+  anos <- do.call(rbind, lapply(fac, function(v) {
+    strat <- if (v %in% c("Treatment", "Compartment") && has_loc) m$Location else NULL
+    a <- anosim(D, m[[v]], permutations = perm, strata = strat, parallel = VEGAN_PAR)
+    data.frame(Factor = v, Permutations = if (is.null(strat)) "free" else "within Location",
+               R = unname(a$statistic), p = a$signif)
+  }))
+  disp <- do.call(rbind, lapply(fac, function(v) {
+    bd <- betadisper(D, m[[v]], type = "centroid")
+    pt <- permutest(bd, permutations = perm, parallel = VEGAN_PAR)
+    md <- tapply(bd$distances, m[[v]], mean)
+    data.frame(Factor = v, F = pt$tab$F[1], p = pt$tab$`Pr(>F)`[1],
+               `Mean distance to centroid` = paste(sprintf("%s: %.2f", names(md), md), collapse = "; "),
+               check.names = FALSE)
+  }))
+
+  list(label = label, scores = scores, ve = ve, global = tidy_adonis(glob),
+       blocked = blocked, country = country, pairwise = pairwise,
+       anosim = anos, permdisp = disp, formula = rhs)
+}
+```
+
+```{r beta-run}
+# Results are cached: permutation tests are recomputed only when the CLR
+# matrix, metadata or permutation settings change.
+beta <- lapply(names(clr), function(nm) {
+  cached(paste0("beta_", nm),
+         list(clr[[nm]], meta, params$permutations, params$permanova_formula, params$seed),
+         { set.seed(params$seed); beta_suite(clr[[nm]], nm) })
+})
+names(beta) <- names(clr)
+
+# Export all tables.
+for (nm in names(beta)) {
+  b <- beta[[nm]]
+  save_table(b$scores, paste0("pca_scores_", nm))
+  save_table(b$global, paste0("permanova_global_", nm))
+  if (!is.null(b$blocked))  save_table(b$blocked,  paste0("permanova_blocked_", nm))
+  if (!is.null(b$country))  save_table(b$country,  paste0("permanova_country_", nm))
+  if (!is.null(b$pairwise)) save_table(b$pairwise, paste0("permanova_pairwise_treatment_", nm))
+  save_table(b$anosim,   paste0("anosim_", nm))
+  save_table(b$permdisp, paste0("permdisp_", nm))
+}
+```
+
+## Taxonomic profiles (`r params$beta_rank`)
+
+```{r beta-tax-tables, results = "asis"}
+b <- beta$Taxonomy
+print(ktab(b$global, paste0("Global PERMANOVA (free permutations): D ~ ", b$formula, ".")))
+if (!is.null(b$blocked))  print(ktab(b$blocked,  "PERMANOVA for compartment and treatment, permutations within locations."))
+if (!is.null(b$country))  print(ktab(b$country,  "PERMANOVA for country, whole locations permuted."))
+if (!is.null(b$pairwise)) print(ktab(b$pairwise, "Pairwise PERMANOVA between treatments (BH-adjusted)."))
+print(ktab(b$anosim,   "ANOSIM."))
+print(ktab(b$permdisp, "PERMDISP (homogeneity of multivariate dispersion)."))
+```
+
+```{r pca-function, eval = DO_PLOTS}
+# Aitchison PCA: one panel per design factor (colour), compartment as shape.
+# Ellipses (95 % normal) are drawn for factors with >= 3 samples in every level.
+plot_pca <- function(b) {
+  sc <- b$scores
+  ax <- sprintf("PC%d (%.1f %%)", 1:2, b$ve[1:2])
+  fac <- intersect(FACTORS, names(sc))
+  fac <- fac[vapply(fac, function(v) nlevels(droplevels(factor(sc[[v]]))) > 1, logical(1))]
+  shp <- if ("Compartment" %in% fac) "Compartment" else NULL
+  panels <- lapply(fac, function(v) {
+    p <- ggplot(sc, aes(PC1, PC2)) +
+      geom_hline(yintercept = 0, colour = "grey85") +
+      geom_vline(xintercept = 0, colour = "grey85") +
+      geom_point(aes(colour = .data[[v]], shape = if (is.null(shp)) NULL else .data[[shp]]),
+                 size = 2.3, alpha = 0.85) +
+      scale_colour_manual(values = pal_for(levels(factor(sc[[v]])))) +
+      labs(x = ax[1], y = ax[2], title = v, shape = shp) +
+      coord_fixed()
+    if (all(table(sc[[v]]) >= 3) && v != "Location") {
+      p <- p + stat_ellipse(aes(colour = .data[[v]], group = .data[[v]]),
+                            type = "norm", level = 0.95, linewidth = 0.4)
+    }
+    p
+  })
+  cowplot::plot_grid(plotlist = panels, ncol = 2, align = "hv")
+}
+```
+
+```{r pca-tax, eval = DO_PLOTS, fig.height = 9, fig.cap = "Aitchison PCA of taxonomic profiles."}
+save_plot(plot_pca(beta$Taxonomy), "pca_taxonomy", height = 9)
+```
+
+## Functional profiles (KO)
+
+```{r beta-fun-tables, results = "asis"}
+b <- beta$Function
+print(ktab(b$global, paste0("Global PERMANOVA (free permutations): D ~ ", b$formula, ".")))
+if (!is.null(b$blocked))  print(ktab(b$blocked,  "PERMANOVA for compartment and treatment, permutations within locations."))
+if (!is.null(b$country))  print(ktab(b$country,  "PERMANOVA for country, whole locations permuted."))
+if (!is.null(b$pairwise)) print(ktab(b$pairwise, "Pairwise PERMANOVA between treatments (BH-adjusted)."))
+print(ktab(b$anosim,   "ANOSIM."))
+print(ktab(b$permdisp, "PERMDISP (homogeneity of multivariate dispersion)."))
+```
+
+```{r pca-fun, eval = DO_PLOTS, fig.height = 9, fig.cap = "Aitchison PCA of functional (KO) profiles."}
+save_plot(plot_pca(beta$Function), "pca_function", height = 9)
+```
+
+# Composition plots
+
+Both plots use the **untrimmed** tables and show relative abundance as a
+share of all reads assigned in that classification. The `r params$top_n_taxa`
+most abundant taxa (mean relative abundance) and the
+`r params$top_n_functions` most abundant KEGG categories are shown
+individually. The remaining features are grouped as "Other".
+
+```{r stacked-function, eval = DO_PLOTS}
+# Stacked relative-abundance bars, one bar per sample, one panel per
+# compartment x treatment; samples ordered by country and location.
+plot_stacked <- function(mat, top_n, legend_title, display = NULL,
+                         special = c("Unclassified", "No KEGG category")) {
+  rel <- mat / rowSums(mat)
+  if (!is.null(display)) colnames(rel) <- display[colnames(rel)]
+  sp  <- intersect(special, colnames(rel))
+  ord <- sort(colMeans(rel[, setdiff(colnames(rel), sp), drop = FALSE]), decreasing = TRUE)
+  top <- names(ord)[seq_len(min(top_n, length(ord)))]
+  oth <- setdiff(colnames(rel), c(top, sp))
+  df  <- cbind(rel[, top, drop = FALSE],
+               Other = if (length(oth)) rowSums(rel[, oth, drop = FALSE]) else 0,
+               rel[, sp, drop = FALSE])
+  long <- as.data.frame(df) |>
+    rownames_to_column("SampleID") |>
+    pivot_longer(-SampleID, names_to = "feature", values_to = "rel") |>
+    left_join(meta, by = "SampleID") |>
+    mutate(feature  = factor(feature, levels = c(top, "Other", sp)),
+           SampleID = factor(SampleID, levels = SAMPLES))
+  cols <- c(pal_for(top), Other = "grey75", Unclassified = "grey45", `No KEGG category` = "grey45")
+  # facet_wrap (not facet_grid) so that each compartment x treatment panel
+  # has its own x axis and shows only its own samples.
+  facet <- if (usable("Compartment", meta)) {
+    facet_wrap(~ Compartment + Treatment, scales = "free_x",
+               nrow = nlevels(meta$Compartment), labeller = label_wrap_gen(multi_line = FALSE))
+  } else {
+    facet_wrap(~ Treatment, scales = "free_x", nrow = 1)
+  }
+  ggplot(long, aes(SampleID, rel, fill = feature)) +
+    geom_col(width = 0.95) +
+    facet +
+    scale_y_continuous(labels = scales::percent, expand = c(0, 0)) +
+    scale_fill_manual(values = cols, name = legend_title) +
+    labs(x = NULL, y = "Relative abundance") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6),
+          legend.text = element_text(size = 8))
+}
+```
+
+```{r taxa-plot, eval = DO_PLOTS, fig.height = 8, fig.cap = "Relative abundance of the most abundant taxa."}
+save_plot(plot_stacked(tax_plot$mat, params$top_n_taxa, params$plot_rank, tax_plot$display),
+          paste0("taxa_barplot_", params$plot_rank), height = 8)
+```
+
+```{r function-plot, eval = DO_PLOTS, fig.height = 8, fig.cap = "Relative abundance of KEGG categories."}
+if (!is.null(cat_mat)) {
+  p_fun <- plot_stacked(cat_mat, params$top_n_functions,
+                        paste0("KEGG level ", params$kegg_plot_level))
+} else {
+  # Fallback without hierarchy files: the most abundant KOs.
+  p_fun <- plot_stacked(ko_mat, params$top_n_functions, "KO")
+}
+save_plot(p_fun, paste0("function_barplot_L", params$kegg_plot_level), height = 8)
+```
+
+```{r composition-tables}
+# Relative-abundance tables behind the plots are exported in full.
+rel_tab <- function(m) { r <- 100 * m / rowSums(m); data.frame(SampleID = rownames(r), r, check.names = FALSE) }
+save_table(rel_tab(tax_plot$mat), paste0("relabund_", params$plot_rank))
+if (!is.null(cat_mat)) save_table(rel_tab(cat_mat), paste0("relabund_KEGG_L", params$kegg_plot_level))
+```
+
+# Alpha diversity (DivNet)
+
+DivNet (Willis & Martin, 2022) estimates Shannon and Simpson diversity of
+each sample's underlying community. It models taxa (or KOs) jointly under a
+log-ratio normal model, so ecological co-occurrence networks are taken into
+account and standard errors reflect both sampling and model uncertainty. Each
+sample is estimated separately (`X = NULL`). Estimates are then compared with
+`betta_random()` (breakaway), which weights each estimate by its standard
+error. The model has fixed effects for country, compartment, treatment and
+the compartment × treatment interaction, and a random effect of location.
+Each factor is tested with a Wald χ² test over all its coefficients. Pairwise
+treatment comparisons are made **within each compartment** from model-based
+marginal means (equal weights over countries), with BH adjustment and compact
+letter displays.
+
+DivNet uses the trimmed tables. With more than
+`r params$divnet_max_taxa_full_network` features, the network is fitted as
+diagonal (`network = "diagonal"`), as recommended by the DivNet authors for
+large tables, because estimating a full network is then computationally
+prohibitive. Use `divnet_tuning = "careful"` for final results.
+
+```{r divnet-run}
+run_divnet <- function(m, label) {
+  cached(paste0("divnet_", label),
+         list(m, params$divnet_tuning, params$divnet_max_taxa_full_network, params$seed),
+         {
+           set.seed(params$seed)
+           ps  <- phyloseq(otu_table(m, taxa_are_rows = FALSE),
+                           sample_data(meta[rownames(m), , drop = FALSE]))
+           net <- if (ncol(m) > params$divnet_max_taxa_full_network) "diagonal" else "default"
+           dv  <- divnet(ps, X = NULL, ncores = N_CORES, network = net,
+                         tuning = params$divnet_tuning)
+           # Keep only the per-sample estimates; the full object can be large.
+           list(network = net,
+                shannon = summary(dv$shannon), simpson = summary(dv$simpson))
+         })
+}
+
+div_sets <- list(Taxonomy = trimmed_div$Taxonomy$mat)
+if (isTRUE(params$divnet_functions)) div_sets$Function <- trimmed_div$Function$mat
+divnet_res <- lapply(names(div_sets), function(nm) run_divnet(div_sets[[nm]], nm))
+names(divnet_res) <- names(div_sets)
+
+# Per-sample estimates (estimate, standard error) in one long table.
+alpha <- rbindlist(lapply(names(divnet_res), function(nm) {
+  rbindlist(lapply(c("shannon", "simpson"), function(ix) {
+    s <- divnet_res[[nm]][[ix]]
+    data.table(Set = nm, Index = ix, SampleID = s$sample_names,
+               estimate = s$estimate, error = s$error)
+  }))
+}))
+alpha <- merge(alpha, as.data.table(meta), by = "SampleID")
+save_table(alpha, "divnet_alpha_estimates")
+ktab(data.frame(Set = names(divnet_res),
+                Features = vapply(div_sets, ncol, integer(1)),
+                Network = vapply(divnet_res, `[[`, "", "network")),
+     "DivNet input: features after trimming and network model used.")
+```
+
+```{r betta-functions}
+# ---- Fit the betta model for one set / index ---------------------------------
+fit_alpha <- function(d) {
+  d <- droplevels(as.data.frame(d))
+  fx <- intersect(c("Country", "Compartment", "Treatment"),
+                  FACTORS[vapply(FACTORS, usable, logical(1), m = d)])
+  if (all(c("Compartment", "Treatment") %in% fx)) fx <- c(fx, "Compartment:Treatment")
+  ff <- as.formula(paste("~", paste(fx, collapse = " + ")))
+  # Location as random effect when it has replication within levels.
+  rnd <- usable("Location", d) && nlevels(d$Location) < nrow(d)
+  fit <- if (rnd) {
+    betta_random(formula = as.formula(paste("estimate ~", paste(fx, collapse = " + "), "| Location")),
+                 ses = "error", data = d)
+  } else {
+    betta(formula = as.formula(paste("estimate ~", paste(fx, collapse = " + "))),
+          ses = "error", data = d)
+  }
+  X <- model.matrix(ff, d)
+  rownames(fit$table) <- colnames(X)            # align coefficient names
+  list(fit = fit, X = X, ff = ff, data = d, random = rnd)
+}
+
+# ---- Wald chi-square test of each model term (all its coefficients jointly) ------
+wald_terms <- function(a) {
+  asg  <- attr(a$X, "assign")
+  labs <- attr(terms(a$ff), "term.labels")
+  do.call(rbind, lapply(seq_along(labs), function(k) {
+    i <- which(asg == k)
+    b <- a$fit$table[i, "Estimates"]
+    V <- a$fit$cov[i, i, drop = FALSE]
+    W <- as.numeric(t(b) %*% solve(V, b))
+    data.frame(Term = labs[k], df = length(i), Chisq = W,
+               p = pchisq(W, length(i), lower.tail = FALSE))
+  }))
+}
+
+# ---- Model-based marginal means and pairwise contrasts ----------------------------
+# Reference grid of all factor combinations; the linear combination for a group
+# is the mean of its grid rows (equal weights over the remaining factors).
+marginal_L <- function(a, by, at = NULL, at_level = NULL) {
+  vars <- all.vars(a$ff)
+  grid <- expand.grid(lapply(a$data[vars], levels), KEEP.OUT.ATTRS = FALSE)
+  for (v in vars) grid[[v]] <- factor(grid[[v]], levels = levels(a$data[[v]]))
+  Xg <- model.matrix(a$ff, grid)
+  sel <- if (is.null(at)) rep(TRUE, nrow(grid)) else grid[[at]] == at_level
+  t(vapply(levels(a$data[[by]]), function(l) colMeans(Xg[sel & grid[[by]] == l, , drop = FALSE]),
+           numeric(ncol(Xg))))
+}
+
+lincom <- function(fit, L) {
+  r <- betta_lincom(fit, L)
+  p <- suppressWarnings(as.numeric(r$`p-values`))
+  p[is.na(p)] <- 0                                 # " < 1e-20"
+  data.frame(estimate = r$Estimates, se = r$`Standard Errors`,
+             lower = r$`Lower CIs`, upper = r$`Upper CIs`, p = p)
+}
+
+# Compact letters; level names are replaced by safe tokens because
+# multcompLetters splits comparison names at "-".
+cld_letters <- function(lv, pairs_df) {
+  tok <- setNames(paste0("g", seq_along(lv)), lv)
+  pv  <- setNames(pairs_df$p_BH, paste(tok[pairs_df$group1], tok[pairs_df$group2], sep = "-"))
+  let <- multcompView::multcompLetters(pv, threshold = 0.05)$Letters
+  setNames(let[tok], lv)
+}
+
+# Pairwise differences between levels of `by` within each level of `at`
+# (default: treatments within compartments). BH adjustment and letters are
+# computed within each compartment. Returns list(means, pairwise).
+pairwise_alpha <- function(a, by = "Treatment", at = "Compartment") {
+  ats <- if (at %in% names(a$data) && usable(at, a$data)) levels(a$data[[at]]) else NA
+  res <- lapply(ats, function(al) {
+    L  <- marginal_L(a, by, if (is.na(al)) NULL else at, al)
+    lv <- rownames(L)
+    means <- do.call(rbind, lapply(lv, function(l) data.frame(group = l, lincom(a$fit, L[l, ]))))
+    prs <- combn(lv, 2, simplify = FALSE)
+    pw  <- do.call(rbind, lapply(prs, function(pr) {
+      data.frame(group1 = pr[1], group2 = pr[2], lincom(a$fit, L[pr[1], ] - L[pr[2], ]))
+    }))
+    pw$p_BH   <- p.adjust(pw$p, "BH")
+    means$cld <- unname(cld_letters(lv, pw)[means$group])
+    means$Compartment <- pw$Compartment <- if (is.na(al)) "All" else al
+    list(means = means, pairwise = pw)
+  })
+  list(means    = do.call(rbind, lapply(res, `[[`, "means")),
+       pairwise = do.call(rbind, lapply(res, `[[`, "pairwise")))
+}
+```
+
+```{r betta-run, results = "asis"}
+alpha_models <- list()
+for (nm in unique(alpha$Set)) for (ix in c("shannon", "simpson")) {
+  d  <- alpha[Set == nm & Index == ix]
+  a  <- fit_alpha(d)
+  wt <- wald_terms(a)
+  ph <- if (usable("Treatment", a$data)) pairwise_alpha(a) else NULL
+  key <- paste(nm, ix, sep = "_")
+  alpha_models[[key]] <- list(model = a, wald = wt, posthoc = ph)
+
+  save_table(wt, paste0("betta_terms_", key))
+  print(ktab(wt, sprintf("%s, %s diversity: Wald tests of model terms (betta%s).",
+                         nm, ix, if (a$random) "_random, Location random" else "")))
+  if (!is.null(ph)) {
+    pw <- ph$pairwise; mn <- ph$means
+    save_table(pw, paste0("betta_pairwise_", key)); save_table(mn, paste0("betta_means_", key))
+    print(ktab(pw[, c("Compartment", "group1", "group2", "estimate", "se", "p", "p_BH")],
+               sprintf("%s, %s: pairwise treatment differences within compartments.", nm, ix)))
+    alpha_models[[key]]$means <- mn
+  }
+}
+```
+
+```{r alpha-plot, eval = DO_PLOTS, fig.height = 8, fig.cap = "DivNet alpha diversity: per-sample estimates (points) and model-based treatment means within compartments (± 95 % CI) with compact letters (BH, alpha = 0.05)."}
+plot_alpha <- function(nm, ix) {
+  d  <- alpha[Set == nm & Index == ix]
+  mn <- alpha_models[[paste(nm, ix, sep = "_")]]$means
+  p <- ggplot(d, aes(Treatment, estimate, colour = Treatment)) +
+    geom_point(position = position_jitter(width = 0.15, seed = 1), alpha = 0.5, size = 1.6) +
+    scale_colour_manual(values = pal_for(levels(meta$Treatment)), guide = "none") +
+    labs(x = NULL, y = paste(tools::toTitleCase(ix), "(DivNet)"), title = paste(nm, "-", ix))
+  if (!is.null(mn)) {
+    mn$Treatment <- factor(mn$group, levels = levels(meta$Treatment))
+    if (usable("Compartment", meta)) mn$Compartment <- factor(mn$Compartment, levels = levels(meta$Compartment))
+    else mn$Compartment <- NULL
+    p <- p +
+      geom_pointrange(data = mn, aes(y = estimate, ymin = lower, ymax = upper),
+                      colour = "black", size = 0.35) +
+      geom_text(data = mn, aes(y = upper, label = cld), colour = "black",
+                vjust = -0.6, size = 3.5)
+  }
+  if (usable("Compartment", meta)) p <- p + facet_wrap(~ Compartment, nrow = 1)
+  p
+}
+panels <- unlist(lapply(unique(alpha$Set), function(nm)
+  lapply(c("shannon", "simpson"), function(ix) plot_alpha(nm, ix))), recursive = FALSE)
+save_plot(cowplot::plot_grid(plotlist = panels, ncol = 2, align = "hv"),
+          "alpha_divnet", height = 4 * ceiling(length(panels) / 2))
+```
+
+# Session information
+
+```{r session}
+if (inherits(VEGAN_PAR, "cluster")) parallel::stopCluster(VEGAN_PAR)
+sessionInfo()
+```
+
+# References
+
+* Anderson, M. J. (2001). A new method for non-parametric multivariate analysis of variance. *Austral Ecology*, 26, 32–46. <https://doi.org/10.1111/j.1442-9993.2001.01070.pp.x>
+* Anderson, M. J. (2006). Distance-based tests for homogeneity of multivariate dispersions. *Biometrics*, 62, 245–253. <https://doi.org/10.1111/j.1541-0420.2005.00440.x>
+* Clarke, K. R. (1993). Non-parametric multivariate analyses of changes in community structure. *Australian Journal of Ecology*, 18, 117–143. <https://doi.org/10.1111/j.1442-9993.1993.tb00438.x>
+* Gloor, G. B., Macklaim, J. M., Pawlowsky-Glahn, V., & Egozcue, J. J. (2017). Microbiome datasets are compositional: and this is not optional. *Frontiers in Microbiology*, 8, 2224. <https://doi.org/10.3389/fmicb.2017.02224>
+* Martín-Fernández, J. A., Hron, K., Templ, M., Filzmoser, P., & Palarea-Albaladejo, J. (2015). Bayesian-multiplicative treatment of count zeros in compositional data sets. *Statistical Modelling*, 15, 134–158. <https://doi.org/10.1177/1471082X14535524>
+* Oksanen, J., et al. vegan: Community Ecology Package. <https://CRAN.R-project.org/package=vegan>
+* Palarea-Albaladejo, J., & Martín-Fernández, J. A. (2015). zCompositions — R package for multivariate imputation of left-censored data under a compositional approach. *Chemometrics and Intelligent Laboratory Systems*, 143, 85–96. <https://doi.org/10.1016/j.chemolab.2015.02.019>
+* Willis, A., Bunge, J., & Whitman, T. (2017). Improved detection of changes in species richness in high diversity microbial communities. *Journal of the Royal Statistical Society C*, 66, 963–977. <https://doi.org/10.1111/rssc.12206>
+* Willis, A. D., & Martin, B. D. (2022). Estimating diversity in networked ecological communities. *Biostatistics*, 23, 207–222. <https://doi.org/10.1093/biostatistics/kxaa015>

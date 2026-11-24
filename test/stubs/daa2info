@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Test stub for MEGAN daa2info: writes one dummy "label<TAB>count" line.
+printf 'stub_class\t1.0\n'

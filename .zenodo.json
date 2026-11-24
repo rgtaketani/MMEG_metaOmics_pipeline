@@ -1,0 +1,23 @@
+{
+  "title": "soil-mtx-mgx-readbased: read-based DIAMOND + MEGAN profiling and compositional analysis of soil metatranscriptomes and metagenomes",
+  "upload_type": "software",
+  "description": "<p>Assembly-free taxonomic and functional (KEGG) profiling of Illumina soil metatranscriptomes and metagenomes with DIAMOND blastx against NCBI-nr and MEGAN Ultimate. Two per-sample Bash pipelines share all parameters that affect comparability, so RNA and DNA profiles can be compared directly. Two R Markdown analyses perform low-abundance trimming, CLR transformation, Aitchison PCA, PERMANOVA (with permutation designs for locations nested in countries), ANOSIM, PERMDISP, composition plots and DivNet alpha diversity. Includes a methods description, workflow figure, simulated test data and smoke tests.</p>",
+  "creators": [
+    {
+      "name": "Taketani, Rodrigo",
+      "affiliation": "Rothamsted Research"
+    }
+  ],
+  "license": "MIT",
+  "keywords": [
+    "metatranscriptomics",
+    "metagenomics",
+    "soil microbiome",
+    "DIAMOND",
+    "MEGAN",
+    "KEGG",
+    "compositional data analysis",
+    "DivNet"
+  ],
+  "version": "1.0.0"
+}

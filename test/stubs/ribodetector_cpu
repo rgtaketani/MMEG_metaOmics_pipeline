@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Test stub for RiboDetector: the first 3 read pairs become "mRNA", the rest
+# "rRNA". Outputs are uncompressed FASTQ, like the real tool.
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -i) i1=$2; i2=$3; shift 2;; -o) o1=$2; o2=$3; shift 2;;
+    -r) r1=$2; r2=$3; shift 2;; --log) touch "$2"; shift;;
+    --version) echo "ribodetector (test stub)"; exit 0;;
+  esac; shift
+done
+zcat "$i1" | head -n 12 > "$o1"; zcat "$i2" | head -n 12 > "$o2"
+zcat "$i1" | tail -n +13 > "$r1"; zcat "$i2" | tail -n +13 > "$r2"

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test stub for fastp: copies the input reads to the output paths and writes
+# empty JSON/HTML reports. Used only by ../run_pipeline_smoke_test.sh.
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --in1) i1=$2;; --in2) i2=$2;; --out1) o1=$2;; --out2) o2=$2;;
+    --json) j=$2;; --html) h=$2;; --version) echo "fastp (test stub)"; exit 0;;
+  esac; shift
+done
+cp "$i1" "$o1"; cp "$i2" "$o2"; echo '{}' > "$j"; echo '<html/>' > "$h"

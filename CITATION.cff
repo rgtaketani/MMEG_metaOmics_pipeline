@@ -1,0 +1,23 @@
+# Citation metadata (https://citation-file-format.github.io/).
+# After the first Zenodo release, add the DOI under "identifiers" and set
+# "repository-code" to the GitHub URL. ORCID can be added under the author.
+cff-version: 1.2.0
+message: "If you use this workflow, please cite it as below."
+title: "soil-mtx-mgx-readbased: read-based DIAMOND + MEGAN profiling and compositional analysis of soil metatranscriptomes and metagenomes"
+type: software
+version: 1.0.0
+date-released: 2026-11-23
+license: MIT
+authors:
+  - family-names: Taketani
+    given-names: Rodrigo
+    affiliation: Rothamsted Research
+keywords:
+  - metatranscriptomics
+  - metagenomics
+  - soil microbiome
+  - DIAMOND
+  - MEGAN
+  - KEGG
+  - compositional data analysis
+  - DivNet

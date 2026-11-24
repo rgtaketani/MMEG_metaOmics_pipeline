@@ -1,0 +1,5 @@
+SampleID,Treatment,Compartment,Country,Location
+Plot01_S1,Control,Bulk,UK,Rothamsted
+Plot02_S2,T1,Bulk,UK,Rothamsted
+Plot03_S3,T2,Rhizosphere,UK,Rothamsted
+Plot04_S4,Control,Rhizosphere,Brazil,Piracicaba

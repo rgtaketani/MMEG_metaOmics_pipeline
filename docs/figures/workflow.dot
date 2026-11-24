@@ -1,0 +1,148 @@
+// =============================================================================
+// workflow_figure.dot
+// Read-based profiling of soil metatranscriptomes and metagenomes
+// (Illumina PE -> DIAMOND blastx vs NCBI-nr -> MEGAN Ultimate: taxonomy + KEGG)
+//
+// Render (Graphviz >= 2.43):
+//   dot -Tsvg workflow_figure.dot -o workflow_figure.svg
+//   dot -Tpdf workflow_figure.dot -o workflow_figure.pdf
+//   dot -Tpng -Gdpi=300 workflow_figure.dot -o workflow_figure.png
+//
+// Colour key: grey  = step identical in both arms (shared code and parameters);
+//             orange text/box = metatranscriptome-specific;
+//             blue text = metagenome-specific option;
+//             dashed = side output retained for downstream analyses.
+// Step numbers are omitted on purpose: the two scripts number their steps
+// differently because the metagenome arm has no rRNA-removal step.
+// =============================================================================
+digraph workflow {
+  graph [rankdir=TB, splines=ortho, nodesep=0.45, ranksep=0.32,
+         fontname="Liberation Sans", fontsize=11, pad=0.25, bgcolor="white",
+         newrank=true];
+  node  [shape=plain, fontname="Liberation Sans", fontsize=10];
+  edge  [color="#4D4D4D", arrowsize=0.6, penwidth=1.1];
+
+  // ---------------------------------------------------------------- Inputs --
+  rna_in [label=<
+    <TABLE BORDER="1.4" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#C46A1B" BGCOLOR="#FBEBDC">
+      <TR><TD><B>Metatranscriptome</B></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">Illumina PE reads (R1, R2)<BR/>stranded, rRNA-depleted library</FONT></TD></TR>
+    </TABLE>>];
+  dna_in [label=<
+    <TABLE BORDER="1.4" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#2F6A9E" BGCOLOR="#E1ECF6">
+      <TR><TD><B>Metagenome</B></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">Illumina PE reads (R1, R2)<BR/>same extracts / sample set</FONT></TD></TR>
+    </TABLE>>];
+
+  // ---------------------------------------------------------- QC / trimming --
+  rna_qc [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Read QC and trimming</B> · <I>fastp</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">adapters, Q20 sliding window, poly-G,<BR/>truncation to common length, min. length</FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9" COLOR="#C46A1B">no deduplication</FONT></TD></TR>
+    </TABLE>>];
+  dna_qc [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Read QC and trimming</B> · <I>fastp</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">adapters, Q20 sliding window, poly-G,<BR/>truncation to common length, min. length</FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9" COLOR="#2F6A9E">+ PCR-duplicate removal</FONT></TD></TR>
+    </TABLE>>];
+
+  // ------------------------------------- rRNA removal (metatranscriptome) --
+  rna_rrna [label=<
+    <TABLE BORDER="1.4" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#C46A1B" BGCOLOR="#FBEBDC">
+      <TR><TD><B>rRNA removal</B> · <I>RiboDetector</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">high-confidence non-rRNA pairs → mRNA fraction</FONT></TD></TR>
+    </TABLE>>];
+  rna_side [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4" COLOR="#C46A1B" STYLE="DASHED" BGCOLOR="white">
+      <TR><TD><FONT POINT-SIZE="9">rRNA reads retained<BR/>(active-community SSU profiling)</FONT></TD></TR>
+    </TABLE>>];
+
+  // ------------------------------------------------- Query construction ---
+  rna_q [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Query construction</B> · <I>awk, pigz</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">mates interleaved (/1, /2);<BR/>each mate classified separately</FONT></TD></TR>
+    </TABLE>>];
+  dna_q [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Query construction</B> · <I>awk, pigz</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">mates interleaved (/1, /2);<BR/>each mate classified separately</FONT></TD></TR>
+    </TABLE>>];
+
+  // ------------------------------------------------------------ DIAMOND ----
+  rna_dmd [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Translated search</B> · <I>DIAMOND blastx</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">default sensitivity, bit score ≥ 55,<BR/>≤ 25 hits per read, DAA output</FONT></TD></TR>
+    </TABLE>>];
+  dna_dmd [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Translated search</B> · <I>DIAMOND blastx</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">default sensitivity, bit score ≥ 55,<BR/>≤ 25 hits per read, DAA output</FONT></TD></TR>
+    </TABLE>>];
+
+  // -------------------------------------------------------------- MEGAN ----
+  rna_meg [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Classification</B> · <I>MEGAN Ultimate (daa-meganizer)</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">weighted LCA (80 %) → NCBI taxonomy;<BR/>best mapped hit → KEGG KO; min. support 10 reads</FONT></TD></TR>
+    </TABLE>>];
+  dna_meg [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#808080" BGCOLOR="#F2F2F2">
+      <TR><TD><B>Classification</B> · <I>MEGAN Ultimate (daa-meganizer)</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">weighted LCA (80 %) → NCBI taxonomy;<BR/>best mapped hit → KEGG KO; min. support 10 reads</FONT></TD></TR>
+    </TABLE>>];
+
+  // ------------------------------------------------------------ Outputs ----
+  rna_out [label=<
+    <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#C46A1B" BGCOLOR="white">
+      <TR><TD><B>MEGAN output (RNA)</B> · <I>daa2info</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">meganized DAA; taxon and KO count tables;<BR/>read-level taxon / KO assignments</FONT></TD></TR>
+    </TABLE>>];
+  dna_out [label=<
+    <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#2F6A9E" BGCOLOR="white">
+      <TR><TD><B>MEGAN output (DNA)</B> · <I>daa2info</I></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">meganized DAA; taxon and KO count tables;<BR/>read-level taxon / KO assignments</FONT></TD></TR>
+    </TABLE>>];
+
+  // --------------------------------------------- Shared reference stack ---
+  refs [label=<
+    <TABLE BORDER="1.2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5" COLOR="#333333" BGCOLOR="#FFFFFF" STYLE="ROUNDED">
+      <TR><TD><B>Shared references</B></TD></TR>
+      <TR><TD><FONT POINT-SIZE="9">NCBI-nr (one DIAMOND index)<BR/>MEGAN UE mapping DB (taxonomy + KEGG)<BR/>identical parameters in both arms</FONT></TD></TR>
+    </TABLE>>];
+
+  // ------------------------------------------------------------- Legend ---
+  legend [label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3" CELLPADDING="2">
+      <TR><TD BGCOLOR="#F2F2F2" BORDER="1" COLOR="#808080" WIDTH="14" HEIGHT="10"></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">identical in both arms</FONT></TD></TR>
+      <TR><TD BGCOLOR="#FBEBDC" BORDER="1" COLOR="#C46A1B" WIDTH="14" HEIGHT="10"></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">metatranscriptome only</FONT></TD></TR>
+      <TR><TD BGCOLOR="#E1ECF6" BORDER="1" COLOR="#2F6A9E" WIDTH="14" HEIGHT="10"></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">metagenome only</FONT></TD></TR>
+      <TR><TD BORDER="1" COLOR="#808080" STYLE="DASHED" WIDTH="14" HEIGHT="10"></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">side output (not profiled here)</FONT></TD></TR>
+    </TABLE>>];
+
+  // -------------------------------------------------------------- Edges ---
+  // The metagenome arm has no rRNA-removal step, so its QC -> query edge
+  // spans that row; this keeps equivalent steps of both arms side by side.
+  rna_in -> rna_qc -> rna_rrna -> rna_q -> rna_dmd -> rna_meg -> rna_out;
+  dna_in -> dna_qc -> dna_q -> dna_dmd -> dna_meg -> dna_out;
+  rna_rrna -> rna_side [style=dashed, color="#C46A1B"];
+  refs -> rna_dmd [style=dashed, color="#333333", constraint=false];
+  refs -> dna_dmd [style=dashed, color="#333333", constraint=false];
+  refs -> rna_meg [style=dashed, color="#333333", constraint=false];
+  refs -> dna_meg [style=dashed, color="#333333", constraint=false];
+
+  // ------------------------------------------------------------- Layout ---
+  {rank=same; rna_in;   dna_in;}
+  {rank=same; rna_qc;   dna_qc;}
+  {rank=same; rna_rrna; rna_side;}
+  {rank=same; rna_q;    refs;   dna_q;}
+  {rank=same; rna_dmd;  dna_dmd;}
+  {rank=same; rna_meg;  dna_meg;}
+  {rank=same; rna_out;  legend; dna_out;}
+  rna_rrna -> rna_side [style=invis];
+  rna_q -> refs -> dna_q [style=invis];
+  rna_out -> legend -> dna_out [style=invis];
+}
