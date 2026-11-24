@@ -1,4 +1,23 @@
+<!--
+  DOI BADGE: replace ADDNUMBER (twice) with the numeric GitHub repository ID.
+  Find it with:  gh api repos/rgtaketani/MMEG_metaOmics_pipeline --jq .id
+  (or on https://zenodo.org/account/settings/github/ after enabling the repo).
+  The badge starts working after the first GitHub release has been archived.
+  Note: Zenodo archives PUBLIC repositories only.
+-->
+<p align="center">
+  <a href="https://www.rothamsted.ac.uk">
+    <img src="docs/figures/rothamsted_logo.png" alt="Rothamsted Research" height="100">
+  </a>
+</p>
+
 # Read-based profiling of soil metatranscriptomes and metagenomes
+
+**Rodrigo G Taketani, David Hughes, Ian M Clark, Tim H Mauchline**
+Rothamsted Research *December, 2026*
+
+[![DOI](https://zenodo.org/badge/ADDNUMBER.svg)](https://zenodo.org/badge/latestdoi/ADDNUMBER)
+[![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](LICENSE)
 
 Taxonomic and functional (KEGG) profiling of Illumina soil
 metatranscriptomes and metagenomes **without assembly**, using
@@ -94,7 +113,7 @@ The figure for the pipeline part (up to the MEGAN output) is available as
 | [`test/`](test/) | Simulated data generator, pipeline smoke test and analysis test ([description](test/README.md)) |
 | [`CITATION.cff`](CITATION.cff), [`.zenodo.json`](.zenodo.json) | Citation metadata for GitHub and Zenodo |
 | [`.gitattributes`](.gitattributes), [`.gitignore`](.gitignore) | Line endings for scripts (LF, also from Windows) and files excluded from git |
-| [`CHANGELOG.md`](CHANGELOG.md), [`LICENSE`](LICENSE) | Version history and licence (MIT) |
+| [`CHANGELOG.md`](CHANGELOG.md), [`LICENSE`](LICENSE) | Version history and licence (CC BY 4.0) |
 
 ## Requirements
 
@@ -216,13 +235,14 @@ See [`test/README.md`](test/README.md) for the simulated design.
 
 ## Citation
 
-If you use this workflow, please cite the archived release (see
-[`CITATION.cff`](CITATION.cff); the Zenodo DOI is added on first release). Also
+If you use this workflow, please cite the archived release using the Zenodo DOI in the badge at the top of
+this page (details in [`CITATION.cff`](CITATION.cff)). Also
 cite the tools it relies on; the full list with references is in
 [`docs/methods.md`](docs/methods.md#references).
 
 ## Licence
 
-Code and documentation are released under the [MIT licence](LICENSE). MEGAN
-Ultimate Edition, NCBI-nr and KEGG are subject to their own licences and terms
-of use.
+This repository is licensed under the
+[Creative Commons Attribution 4.0 International licence (CC BY 4.0)](LICENSE).
+MEGAN Ultimate Edition, NCBI-nr and KEGG are subject to their own licences
+and terms of use.

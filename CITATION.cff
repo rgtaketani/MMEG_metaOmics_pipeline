@@ -7,7 +7,7 @@ title: "soil-mtx-mgx-readbased: read-based DIAMOND + MEGAN profiling and composi
 type: software
 version: 1.0.0
 date-released: 2026-11-23
-license: MIT
+license: CC-BY-4.0
 authors:
   - family-names: Taketani
     given-names: Rodrigo
